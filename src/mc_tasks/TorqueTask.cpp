@@ -1,65 +1,84 @@
-#include <mc_tasks/TorqueTask.h>
-#include <mc_tasks/MetaTaskLoader.h>
 #include <mc_rbdyn/Robot.h>
-#include <mc_solver/QPSolver.h>
+#include <mc_rtc/gui/ArrayInput.h>
+#include <mc_rtc/gui/ArrayLabel.h>
 #include <mc_rtc/gui/NumberInput.h>
 #include <mc_rtc/log/Logger.h>
+#include <mc_solver/QPSolver.h>
+#include <mc_tasks/MetaTaskLoader.h>
+#include <mc_tasks/TorqueTask.h>
 #include <RBDyn/FD.h>
+#include "mc_rtc/logging.h"
+#include <cstddef>
 
 namespace mc_tasks
 {
 
 TorqueTask::TorqueTask(const mc_solver::QPSolver & solver, unsigned int rIndex, double weight)
-: PostureTask(solver, rIndex, 0.1, weight),
-  dt_(solver.dt()),
-  rIndex_(rIndex),
-  robots_(solver.robots())
+: PostureTask(solver, rIndex, 0.1, weight), dt_(solver.dt()), rIndex_(rIndex), robots_(solver.robots())
 {
-  desiredTorque_ = Eigen::VectorXd::Zero(robots_.robot(rIndex_).mb().nrDof());
   type_ = "torque";
   name_ = std::string("torque_") + robots_.robot(rIndex_).name();
+  reset();
 }
 
-void TorqueTask::desiredTorque(const Eigen::VectorXd & tau)
+void TorqueTask::torque(const std::vector<std::vector<double>> & tau)
 {
-  desiredTorque_ = tau;
-}
-
-const Eigen::VectorXd & TorqueTask::desiredTorque() const
-{
-  return desiredTorque_;
-}
-
-Eigen::VectorXd TorqueTask::currentTorques() const
-{
-  const auto & jointTorque = robots_.robot(rIndex_).mbc().jointTorque;
-  const auto & mb = robots_.robot(rIndex_).mb();
-
-  Eigen::VectorXd result = Eigen::VectorXd::Zero(mb.nrDof());
-
-  for(size_t i = 0; i < jointTorque.size(); ++i)
+  if(tau.size() != robots_.robot(rIndex_).jointTorque().size())
   {
-    const auto & joint = mb.joint(i);
-    const auto & joint_torques = jointTorque[i];
-
-    size_t dofIndex = mb.jointPosInDof(i);
-
-    for(size_t j = 0; j < joint.dof(); ++j)
-    {
-      if (j < joint_torques.size()) {
-        result(dofIndex + j) = joint_torques[j];
-      } else {
-        result(dofIndex + j) = 0.0;
-      }
-    }
+    mc_rtc::log::error_and_throw("[{}] Input torque vector has size {}, expected {}", name(), tau.size(),
+                                 robots_.robot(rIndex_).jointTorque().size());
   }
-  return result;
+
+  torque_ = tau;
+}
+
+void TorqueTask::torque(const std::string & jointName, std::vector<double> tau)
+{
+  if(!robots_.robot(rIndex_).hasJoint(jointName))
+  {
+    mc_rtc::log::error_and_throw("[{}] No joint named {} in {}", name(), jointName, robots_.robot(rIndex_).name());
+  }
+ 
+  auto jIndex = static_cast<int>(robots_.robot(rIndex_).jointIndexByName(jointName));
+  torque_[jIndex] = tau;
+}
+
+std::vector<std::vector<double>> TorqueTask::torque() const
+{
+  return torque_;
+}
+
+void TorqueTask::target(const std::map<std::string, std::vector<double>> & joints)
+{
+  for(const auto & j : joints) { torque(j.first, j.second); }
 }
 
 void TorqueTask::reset()
 {
-  desiredTorque_.setZero();
-  PostureTask::reset();
+  torque(robots_.robot(rIndex_).mbc().jointTorque);
+}
+
+Eigen::VectorXd TorqueTask::jointsToDofs(const std::vector<std::vector<double>> & joints)
+{
+  const auto & mb = robots_.robot(rIndex_).mb();
+
+  Eigen::VectorXd result = Eigen::VectorXd::Zero(mb.nrDof());
+
+  for(size_t i = 0; i < joints.size(); ++i)
+  {
+    auto jIndex = static_cast<int>(i);
+    const auto & joint = mb.joint(jIndex);
+    const auto & joint_torque = joints[jIndex];
+
+    size_t dofIndex = mb.jointPosInDof(jIndex);
+
+    for(size_t j = 0; j < joint.dof(); ++j)
+    {
+      if(j < joint_torque.size()) { result(dofIndex + j) = joint_torque[j]; }
+      else { result(dofIndex + j) = 0.0; }
+    }
+  }
+  return result;
 }
 
 void TorqueTask::update(mc_solver::QPSolver & solver)
@@ -70,23 +89,35 @@ void TorqueTask::update(mc_solver::QPSolver & solver)
   fd.computeC(robot.mb(), robot.mbc());
   const Eigen::MatrixXd & M = fd.H();
   const Eigen::VectorXd & Cg = fd.C();
-  Eigen::VectorXd refAccel = M.ldlt().solve(desiredTorque_ - Cg);
+  const Eigen::VectorXd tau_d = jointsToDofs(torque_);
+  Eigen::VectorXd refAccel = M.ldlt().solve(tau_d - Cg);
   PostureTask::refAccel(refAccel);
   PostureTask::update(solver);
 }
 
 void TorqueTask::addToLogger(mc_rtc::Logger & logger)
 {
-  logger.addLogEntry(name_ + "_desiredTorque", this, [this]() { return desiredTorque_; });
-  logger.addLogEntry(name_ + "_currentTorques", this, [this]() { return currentTorques(); });
+  logger.addLogEntry(name_ + "_tau_d ", this,
+                     [this]()
+                     {
+                       std::vector<double> tau(robots_.robot(rIndex_).refJointOrder().size(), 0);
+                       auto & robot = robots_.robot(rIndex_);
+                       for(size_t i = 0; i < tau.size(); i++)
+                       {
+                         auto mbcIndex = robot.jointIndexInMBC(i);
+                         tau[i] = torque_[static_cast<size_t>(mbcIndex)][0];
+                       }
+                       return tau;
+                     });
 }
 
 void TorqueTask::addToGUI(mc_rtc::gui::StateBuilder & gui)
 {
   MetaTask::addToGUI(gui);
   gui.addElement({"Tasks", name_, "Torque"},
-                 mc_rtc::gui::NumberInput("Desired Torque", [this]() { return this->desiredTorque_; },
-                                           [this](const Eigen::VectorXd & tau) { this->desiredTorque(tau); }));
+                 mc_rtc::gui::ArrayInput(
+                     "Desired Torque", [this]() { return this->jointsToDofs(this->torque_); },
+                     [this](const std::vector<std::vector<double>> & tau) { this->torque(tau); }));
 }
 
 } // namespace mc_tasks
@@ -99,12 +130,8 @@ static auto registered = mc_tasks::MetaTaskLoader::register_load_function(
     {
       const auto robotIndex = robotIndexFromConfig(config, solver.robots(), "torque");
       auto t = std::make_shared<mc_tasks::TorqueTask>(solver, robotIndex, config("weight", 10.));
-      // Optionally load desired torque from config
-      if(config.has("desiredTorque"))
-      {
-        t->desiredTorque(config("desiredTorque"));
-      }
+      if(config.has("tau_d")) { t->torque(config("tau_d")); }
       t->load(solver, config);
       return t;
     });
-} 
+} // namespace

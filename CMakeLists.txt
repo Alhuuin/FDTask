@@ -4,7 +4,7 @@ set(CXX_DISABLE_WERROR 1)
 set(CMAKE_CXX_STANDARD 17)
 
 set(PROJECT_NAME TorqueTask)
-set(PROJECT_DESCRIPTION "TorqueTask task for mc_rtc")
+set(PROJECT_DESCRIPTION "Torque task for mc_rtc")
 set(PROJECT_URL "")
 
 set(PROJECT_USE_CMAKE_EXPORT TRUE)
@@ -17,7 +17,7 @@ if(NOT TARGET mc_rtc::control)
   find_package(mc_rtc REQUIRED)
 endif()
 
-enable_testing()
+# enable_testing()
 
 # if(BUILD_TESTING)
 #   add_subdirectory(tests)
